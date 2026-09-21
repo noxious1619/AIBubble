@@ -9,7 +9,8 @@
 
 | Field | Value |
 |-------|-------|
-| **Repo name** | `ai-bubble-doomsday-clock` |
+| **Repo name** | `AIBubble` |
+| **GitHub** | [https://github.com/noxious1619/AIBubble](https://github.com/noxious1619/AIBubble) |
 | **Description** | A real-time econophysics platform predicting AI market fragility via LPPLS regression and macro stress indexing |
 | **Canonical docs path** | `/docs/` |
 | **Primary language** | TypeScript (Node.js backend + Next.js frontend), Python (math engine) |
@@ -17,11 +18,53 @@
 
 ---
 
-## 2. Architecture Invariants
+## 2. Current Project State (as of 2026-09-21)
+
+### 2.1 What Is Built and Working
+
+The following features are **fully implemented and verified running locally via Docker Compose**:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Python LPPLS Engine (FastAPI) | ✅ Working | `engine/` — `POST /solve`, `GET /health` |
+| Node.js Orchestration API | ✅ Working | `backend/` — Express + Drizzle ORM, port 5000 |
+| Next.js Frontend | ✅ Working | `frontend/` — Next.js 14 App Router, port 3000 |
+| PostgreSQL Database | ✅ Working | Postgres 16-alpine via Docker, port 5434 |
+| Redis Cache | ✅ Working | Redis 7-alpine via Docker, port 6380 |
+| Data Pipeline (`/admin/trigger-pipeline`) | ✅ Working | yfinance ingestion → LPPLS → hazard rate |
+| Doomsday Clock Face UI | ✅ Working | Animated SVG clock with glow, color bands |
+| Analytics Drawer | ✅ Working | "View the Math" terminal-style drawer |
+| Share Modal + OG Image | ✅ Working | `/api/og` generates live PNG via `@vercel/og` |
+| Redis Fallback to Postgres | ✅ Working | Postgres fallback when Redis miss in clock controller |
+| Docker Compose full-stack | ✅ Working | All 5 containers start, health-checked |
+
+### 2.2 Known Issues / Technical Debt
+
+| Issue | Severity | Notes |
+|-------|----------|-------|
+| `fundamental_data` table is empty | Medium | CapEx sub-score uses placeholder values until quarterly pipeline runs |
+| `ingestion.service.ts` non-atomic inserts | Low | Multi-step insert has no transaction rollback; identified in audit |
+| CORS whitelist hardcoded | Low | `ALLOWED_ORIGINS` should be an env var |
+| No HTTPS/TLS in Docker | Low | Development only; needs nginx reverse proxy for production |
+| `drizzle-orm` / `drizzle-kit` version mismatch | Low | Run `npm update drizzle-orm drizzle-kit` in backend if using Drizzle Studio |
+
+### 2.3 Port Map (Local Docker)
+
+| Service | Internal Port | Host Port |
+|---------|--------------|-----------|
+| Next.js Frontend | 3000 | 3000 |
+| Node.js API | 5000 | 5000 |
+| Python Engine | 8000 | 8000 |
+| PostgreSQL | 5432 | **5434** |
+| Redis | 6379 | **6380** |
+
+---
+
+## 3. Architecture Invariants
 
 These rules are non-negotiable. Any agent or contributor that violates them introduces undefined behavior into the system.
 
-### 2.1 Service Boundary Rule
+### 3.1 Service Boundary Rule
 
 The system is divided into **two hard-separated compute layers**:
 
@@ -35,19 +78,21 @@ The system is divided into **two hard-separated compute layers**:
 - The Python engine **never** calls Node.js.
 - The Node.js backend calls the Python engine via internal HTTP (`POST /solve`) and treats it as a pure function.
 - Frontend **never** calls the Python engine directly.
+- The OG Image route (`/api/og`) runs as a Next.js Edge Function and calls the Node API via `INTERNAL_API_URL` (Docker internal hostname `http://backend:5000`). It must **never** call `http://localhost:5000` — that resolves to the container itself, not the backend.
 
 ```
-[Browser] ──► [Next.js SSR] ──► [Node API :3001] ──► [Python Engine :8000]
-                                      │                        (pure math only)
-                                      ├──► [PostgreSQL :5432]
-                                      └──► [Redis :6379]
+[Browser] ──► [Next.js SSR :3000] ──► [Node API :5000] ──► [Python Engine :8000]
+                     │  (api/og edge fn)        │                   (pure math only)
+                     │  uses INTERNAL_API_URL   ├──► [PostgreSQL :5432]
+                     │                          └──► [Redis :6379]
+                     └──► [NEXT_PUBLIC_API_URL=http://localhost:5000 (client-side)]
 ```
 
-### 2.2 Python Purity Constraint
+### 3.2 Python Purity Constraint
 
 > **RULE: The Python math engine is a pure function. It is categorically forbidden from performing I/O.**
 
-The following are **STRICTLY FORBIDDEN** inside `services/python-engine/`:
+The following are **STRICTLY FORBIDDEN** inside `engine/`:
 
 - ❌ Database connections of any kind (SQLAlchemy, psycopg2, SQLite, etc.)
 - ❌ HTTP calls to any external service (requests, httpx, aiohttp)
@@ -64,23 +109,30 @@ The following are **REQUIRED**:
 - ✅ Outputs: typed dataclasses (`@dataclass`) or Pydantic models
 - ✅ All floating-point operations must be deterministic with explicit dtype declarations
 
-### 2.3 Node.js Orchestration Ownership
+### 3.3 Node.js Orchestration Ownership
 
 The Node.js backend has **exclusive ownership** of:
 
-- ✅ All database reads and writes (PostgreSQL via `pg`)
+- ✅ All database reads and writes (PostgreSQL via Drizzle ORM)
 - ✅ Redis cache reads, writes, and invalidation
 - ✅ Cron job scheduling (`node-cron`)
 - ✅ External API calls (yfinance wrapper, SEC EDGAR)
 - ✅ All inbound HTTP traffic from the browser
-- ✅ OG image generation
 - ✅ Rate limiting and authentication middleware
 
-### 2.4 LPPLS Mathematical Bounds — **IMMUTABLE CONSTANTS**
+### 3.4 OG Image Generation (Satori Constraints)
+
+The `/api/og` route uses `@vercel/og` (Satori + Yoga layout engine). Satori is **not a browser** — it is a strict subset of CSS. The following rules are **mandatory** for all JSX inside `frontend/src/app/api/og/route.tsx`:
+
+- ❌ **No `calc()` expressions** — use explicit pixel values (parent dims are fixed at 1200×630)
+- ❌ **No raw text nodes adjacent to elements** — wrap all text in `<span>`
+- ✅ Every `<div>` with more than one child **must** have `display: 'flex'` explicitly set
+- ✅ Use `cache: 'no-store'` on any `fetch()` inside the route to prevent stale data
+- ✅ Set `INTERNAL_API_URL=http://backend:5000` in the frontend container — never use `localhost` for SSR fetches
+
+### 3.5 LPPLS Mathematical Bounds — **IMMUTABLE CONSTANTS**
 
 > ⛔ **MODIFYING THESE BOUNDS IS STRICTLY FORBIDDEN WITHOUT A FORMAL ADR.**
-
-The LPPLS model optimization is constrained by the following bounds, derived from Sornette (2003) and validated against historical crash data:
 
 | Parameter | Symbol | Lower Bound | Upper Bound | Interpretation |
 |-----------|--------|------------|------------|---------------|
@@ -96,9 +148,9 @@ The LPPLS model optimization is constrained by the following bounds, derived fro
 
 ---
 
-## 3. Code Standards
+## 4. Code Standards
 
-### 3.1 Python
+### 4.1 Python
 
 - **Style**: PEP 8 enforced via `ruff`
 - **Types**: `mypy --strict` must pass — no `Any`, no untyped functions
@@ -107,7 +159,7 @@ The LPPLS model optimization is constrained by the following bounds, derived fro
 - **Dependencies**: Pinned in `requirements.txt` with exact versions (e.g., `scipy==1.13.1`)
 - **Testing**: `pytest` with minimum 95% coverage on the math engine
 
-### 3.2 Node.js / TypeScript
+### 4.2 Node.js / TypeScript
 
 - **Style**: ESLint + Prettier — `npm run lint` must pass with zero warnings
 - **Types**: TypeScript strict mode — `noImplicitAny: true`, `strictNullChecks: true`
@@ -115,40 +167,82 @@ The LPPLS model optimization is constrained by the following bounds, derived fro
 - **Error handling**: No unhandled promise rejections — all async functions must have try/catch or `.catch()` handlers
 - **Dependencies**: Pinned in `package-lock.json`
 
-### 3.3 SQL
+### 4.3 SQL
 
 - **Migrations**: All schema changes via versioned sequential migration files
-  - Format: `migrations/NNN_description.sql` (e.g., `migrations/001_init_schema.sql`)
+  - Format: `backend/src/db/migrations/NNN_description.sql`
   - Each migration must have a corresponding rollback section
 - **NEVER** run raw `ALTER TABLE` or `DROP TABLE` outside a migration file
 - **NEVER** use `SELECT *` in application code — always enumerate columns explicitly
 
-### 3.4 Frontend (Next.js / React)
+### 4.4 Frontend (Next.js / React)
 
-- **Framework**: Next.js App Router (not Pages Router)
+- **Framework**: Next.js 14 App Router (not Pages Router)
 - **Styling**: Tailwind CSS
-- **Data fetching**: SWR for client-side, `fetch` with `cache` for server components
+- **Data fetching**: SWR for client-side, `fetch` with `cache: 'no-store'` for edge/server components
 - **Accessibility**: All interactive elements must have ARIA labels; clock face must have a text alternative
+- **OG Image**: See §3.4 for Satori constraints — these are bugs, not suggestions
 
 ---
 
-## 4. Branching & Commit Convention
+## 5. Environment Variables Contract
 
-### 4.1 Branching Strategy
+Each service must **only** read from its approved environment variables. Reading another service's secrets is forbidden.
+
+### Python Engine (`engine/`)
+```
+PORT=8000
+LOG_LEVEL=INFO
+```
+
+### Node.js API (`backend/.env`)
+```
+PORT=5001
+DATABASE_URL=postgresql://admin:password@localhost:5434/aibubble
+REDIS_URL=redis://localhost:6380
+PYTHON_ENGINE_URL=http://localhost:8000
+CRON_ENABLED=true
+INTERNAL_API_SECRET=<secret>
+LOG_LEVEL=info
+```
+
+### Next.js Frontend (`frontend/.env.local`)
+```
+NEXT_PUBLIC_API_URL=http://localhost:5000
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
+```
+
+### Docker Compose (overrides the above for container networking)
+```
+# Backend container
+DATABASE_URL=postgresql://admin:password@postgres:5432/aibubble
+REDIS_URL=redis://redis:6379
+PYTHON_ENGINE_URL=http://engine:8000
+
+# Frontend container
+NEXT_PUBLIC_API_URL=http://localhost:5000   # browser-side (stays localhost)
+INTERNAL_API_URL=http://backend:5000        # SSR/edge-side (uses Docker DNS)
+```
+
+> ⚠️ **NEVER confuse `NEXT_PUBLIC_API_URL` and `INTERNAL_API_URL`.**
+> `NEXT_PUBLIC_*` variables are baked into the browser bundle at build time and must use `localhost`.
+> `INTERNAL_API_URL` is read at server runtime and must use the Docker service hostname.
+
+---
+
+## 6. Branching & Commit Convention
+
+### 6.1 Branching Strategy
 
 - **Trunk-based development**: all work branches off `main` and merges back within 48 hours
-- **Feature flags** over long-lived feature branches — ship dark by default
 - Branch naming: `<type>/<short-description>` (e.g., `feat/lppls-confidence-score`, `fix/redis-stale-cache`)
 
-### 4.2 Conventional Commits
+### 6.2 Conventional Commits
 
 All commits must follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
 <type>(<scope>): <description>
-
-[optional body]
-[optional footer]
 ```
 
 | Type | When to use |
@@ -165,11 +259,11 @@ All commits must follow [Conventional Commits](https://www.conventionalcommits.o
 
 ---
 
-## 5. Documentation Rules
+## 7. Documentation Rules
 
-### 5.1 Change Coupling
+### 7.1 Change Coupling
 
-Every architectural change **must** be accompanied by an update to the relevant `docs/` file in the same pull request:
+Every architectural change **must** be accompanied by an update to the relevant `docs/` file:
 
 | Type of Change | Docs file to update |
 |----------------|-------------------|
@@ -180,68 +274,24 @@ Every architectural change **must** be accompanied by an update to the relevant 
 | Architectural decision | `docs/11-decisions.md` (new ADR) |
 | LPPLS bounds change | `docs/11-decisions.md` **(mandatory ADR)** |
 | New component | `docs/08-design-system.md` |
-
-### 5.2 Mathematical Notation
-
-All mathematical formulae in documentation must use **LaTeX notation** within Markdown fenced blocks or inline `$...$` delimiters:
-
-```markdown
-The LPPLS model is defined as:
-$$\ln P(t) = A + B(t_c - t)^m [1 + C\cos(\omega \ln(t_c - t) + \phi)]$$
-```
-
-### 5.3 No Vague Placeholders
-
-Documentation must contain **exact** values, types, and constraints — never:
-- ❌ "some number" → ✅ `NUMERIC(12,6)`
-- ❌ "fast response" → ✅ `p95 < 200ms`
-- ❌ "approximately weekly" → ✅ `0 17 * * 1-5` (cron expression)
+| OG Image / Satori CSS rules | This file, §3.4 |
 
 ---
 
-## 6. Environment Variables Contract
+## 8. CI/CD Gates
 
-Each service must **only** read from its approved environment variables. Reading another service's secrets is forbidden.
-
-### Python Engine (`services/python-engine/.env`)
-```
-PORT=8000
-LOG_LEVEL=INFO
-```
-
-### Node.js API (`services/api/.env`)
-```
-PORT=3001
-DATABASE_URL=postgresql://...
-REDIS_URL=redis://...
-PYTHON_ENGINE_URL=http://python-engine:8000
-CRON_ENABLED=true
-INTERNAL_API_SECRET=<secret>
-LOG_LEVEL=info
-```
-
-### Next.js Frontend (`frontend/.env`)
-```
-NEXT_PUBLIC_API_URL=http://localhost:3001
-```
-
----
-
-## 7. CI/CD Gates
-
-All pull requests must pass the following checks before merge is allowed:
+All pull requests must pass the following checks before merge:
 
 | Gate | Command | Must pass |
 |------|---------|-----------|
-| Python lint | `ruff check services/python-engine` | ✅ Zero violations |
-| Python types | `mypy --strict services/python-engine` | ✅ Zero errors |
-| Python tests | `pytest services/python-engine --cov --cov-fail-under=95` | ✅ ≥95% coverage |
-| Node lint | `npm run lint` | ✅ Zero warnings |
-| Node types | `npm run type-check` | ✅ Zero errors |
-| Node tests | `npm run test -- --coverage` | ✅ ≥85% coverage |
-| Frontend tests | `npm run test:ui -- --coverage` | ✅ ≥80% coverage |
-| Build | `docker compose build` | ✅ All images build |
+| Python lint | `ruff check engine/` | ✅ Zero violations |
+| Python types | `mypy --strict engine/` | ✅ Zero errors |
+| Python tests | `pytest engine/ --cov --cov-fail-under=95` | ✅ ≥95% coverage |
+| Node lint | `npm run lint` (in `backend/`) | ✅ Zero warnings |
+| Node types | `npm run type-check` (in `backend/`) | ✅ Zero errors |
+| Node tests | `npm run test -- --coverage` (in `backend/`) | ✅ ≥85% coverage |
+| Docker build | `docker compose build` | ✅ All 5 images build |
 
 ---
 
-*Last updated: 2026-09-17 | Maintained by: Systems Architecture team*
+*Last updated: 2026-09-21 | Maintained by: Systems Architecture team*

@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #0A0A0F;
+    --card: #12121A;
+    
+    --primary: #FF3B3B;
+    --secondary: #00E5FF;
+    --warning: #FFB800;
+    
+    --text-primary: #E0E0E0;
+    --text-secondary: #808090;
+    --text-muted: #404050;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}

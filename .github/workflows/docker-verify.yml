@@ -1,0 +1,17 @@
+name: Docker Verify
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  verify-compose:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Verify Docker Compose Config
+      run: docker compose config
+    - name: Build Images
+      run: docker compose build
